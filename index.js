@@ -8,7 +8,8 @@ const {
     ButtonStyle, 
     ChannelType, 
     PermissionFlagsBits,
-    EmbedBuilder
+    EmbedBuilder,
+    Events
 } = require('discord.js');
 const express = require('express');
 require('dotenv').config();
@@ -56,7 +57,7 @@ const temporaryChannels = new Set();
 // ==========================================
 // 3. ÉVÉNEMENT READY
 // ==========================================
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
     console.log(`===============================================`);
     console.log(`✅ Bot connecté avec succès : ${client.user.tag}`);
     console.log(`🛡️ Modules actifs : Sécurité, Auto-Voice, Tickets, Web Keep-Alive`);
