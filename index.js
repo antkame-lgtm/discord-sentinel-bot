@@ -38,7 +38,7 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 2. CLIENT DISCORD
+// 2. CLIENT DISCORD & CACHES
 // ==========================================
 const client = new Client({
     intents: [
@@ -51,8 +51,26 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// Map pour suivre les salons vocaux temporaires (Auto-Voice)
+// Salons vocaux temporaires (Auto-Voice)
 const temporaryChannels = new Set();
+
+// Cache pour la détection Anti-Spam rapide
+const userMessageHistory = new Map();
+
+// Helper : Envoi dans le salon de logs d'audit
+async function sendLog(guild, embed) {
+    try {
+        const logChannel = guild.channels.cache.find(c => 
+            ['logs', 'audit-logs', 'mod-logs', 'bot-logs'].includes(c.name.toLowerCase()) &&
+            c.type === ChannelType.GuildText
+        );
+        if (logChannel) {
+            await logChannel.send({ embeds: [embed] });
+        }
+    } catch (err) {
+        console.error('[Audit Log Error]', err);
+    }
+}
 
 // ==========================================
 // 3. ENREGISTREMENT DES SLASH COMMANDS
@@ -60,12 +78,11 @@ const temporaryChannels = new Set();
 client.once(Events.ClientReady, async () => {
     console.log(`===============================================`);
     console.log(`✅ Bot connecté avec succès : ${client.user.tag}`);
-    console.log(`🛡️ Modules actifs : Sécurité, Auto-Voice, Tickets, Web Keep-Alive`);
+    console.log(`🛡️ Modules actifs : Sécurité, Anti-Spam, Auto-Voice, Tickets, Modération, Auto-Rôle`);
     console.log(`===============================================`);
     
     client.user.setActivity('protéger le serveur | /help', { type: 3 }); // 3 = WATCHING
 
-    // Déclaration des commandes slash
     const commands = [
         new SlashCommandBuilder()
             .setName('ping')
@@ -79,8 +96,8 @@ client.once(Events.ClientReady, async () => {
             .setName('clear')
             .setDescription('Purger un nombre de messages dans le salon (Modération)')
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-            .addIntegerOption(option =>
-                option.setName('nombre')
+            .addIntegerOption(opt =>
+                opt.setName('nombre')
                     .setDescription('Nombre de messages à supprimer (1 à 100)')
                     .setRequired(true)
                     .setMinValue(1)
@@ -90,26 +107,97 @@ client.once(Events.ClientReady, async () => {
         new SlashCommandBuilder()
             .setName('ticket')
             .setDescription('Déployer le panneau de support interactif avec bouton')
-            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+        new SlashCommandBuilder()
+            .setName('kick')
+            .setDescription('Expulser un membre du serveur')
+            .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
+            .addUserOption(opt => opt.setName('membre').setDescription('Membre à expulser').setRequired(true))
+            .addStringOption(opt => opt.setName('raison').setDescription('Raison de l\'expulsion')),
+
+        new SlashCommandBuilder()
+            .setName('ban')
+            .setDescription('Bannir définitivement un membre du serveur')
+            .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+            .addUserOption(opt => opt.setName('membre').setDescription('Membre à bannir').setRequired(true))
+            .addStringOption(opt => opt.setName('raison').setDescription('Raison du bannissement')),
+
+        new SlashCommandBuilder()
+            .setName('timeout')
+            .setDescription('Exclure temporairement un membre (mute/slowdown)')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+            .addUserOption(opt => opt.setName('membre').setDescription('Membre à sanctionner').setRequired(true))
+            .addIntegerOption(opt => 
+                opt.setName('minutes')
+                    .setDescription('Durée de l\'exclusion en minutes (ex: 5, 60)')
+                    .setRequired(true)
+                    .setMinValue(1)
+                    .setMaxValue(40320)
+            )
+            .addStringOption(opt => opt.setName('raison').setDescription('Raison du timeout'))
     ];
 
     try {
         await client.application.commands.set(commands);
-        console.log('⚡ [Slash Commands] Commandes globales enregistrées avec succès (/ping, /help, /clear, /ticket).');
+        console.log('⚡ [Slash Commands] Commandes globales enregistrées : /ping, /help, /clear, /ticket, /kick, /ban, /timeout');
     } catch (err) {
         console.error('[Slash Commands Error]', err);
     }
 });
 
 // ==========================================
-// 4. GESTION DES INTERACTIONS (Slash Commands & Boutons)
+// 4. MODULE BIENVENUE & AUTO-RÔLE
+// ==========================================
+client.on(Events.GuildMemberAdd, async (member) => {
+    const guild = member.guild;
+
+    // 1. Auto-Rôle (attribue le rôle 'Membre' ou 'Member' si configuré)
+    try {
+        const autoRole = guild.roles.cache.find(r => ['membre', 'member', 'nouveau'].includes(r.name.toLowerCase()));
+        if (autoRole && guild.members.me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+            await member.roles.add(autoRole);
+        }
+    } catch (err) {
+        console.error('[Auto-Role Error]', err);
+    }
+
+    // 2. Message de Bienvenue
+    const welcomeChannel = guild.channels.cache.find(c => 
+        ['bienvenue', 'welcome', 'arrivées'].includes(c.name.toLowerCase()) &&
+        c.type === ChannelType.GuildText
+    ) || guild.systemChannel;
+
+    if (welcomeChannel) {
+        const welcomeEmbed = new EmbedBuilder()
+            .setTitle(`👋 Bienvenue sur le serveur, ${member.displayName} !`)
+            .setColor(0x00FF88)
+            .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+            .setDescription(`Ravi de t'accueillir parmi nous ! Prends connaissance des règles et installe-toi confortablement.\n\n👥 Nous sommes désormais **${guild.memberCount}** membres.`)
+            .setTimestamp();
+
+        welcomeChannel.send({ embeds: [welcomeEmbed] }).catch(() => {});
+    }
+
+    // 3. Log d'audit
+    const logEmbed = new EmbedBuilder()
+        .setTitle('📥 Nouveau membre')
+        .setColor(0x00FF88)
+        .setDescription(`<@${member.id}> (${member.user.tag}) a rejoint le serveur.`)
+        .setFooter({ text: `ID: ${member.id}` })
+        .setTimestamp();
+    sendLog(guild, logEmbed);
+});
+
+// ==========================================
+// 5. GESTION DES INTERACTIONS (Commandes & Boutons)
 // ==========================================
 client.on(Events.InteractionCreate, async (interaction) => {
-    // A. COMMANDES SLASH
+    // A. SLASH COMMANDS
     if (interaction.isChatInputCommand()) {
         const { commandName } = interaction;
 
-        // Commande /ping
+        // /ping
         if (commandName === 'ping') {
             const ping = Date.now() - interaction.createdTimestamp;
             await interaction.reply({
@@ -118,51 +206,43 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
-        // Commande /help
+        // /help
         if (commandName === 'help') {
             const helpEmbed = new EmbedBuilder()
-                .setTitle('🛡️ Sentinel Bot - Fonctionnalités & Commandes')
+                .setTitle('🛡️ Sentinel Bot - Liste des Fonctionnalités')
                 .setColor(0x5865F2)
-                .setDescription('Bot tout-en-un optimisé pour la sécurité, l\'automatisation vocale et le support 24/7.')
+                .setDescription('Bot complet intégrant protection, support, modération et salons dynamiques 24/7.')
                 .addFields(
-                    { 
-                        name: '🛡️ Sécurité & Anti-Scam (Automatique)', 
-                        value: 'Détecte et supprime automatiquement les faux liens Discord Nitro et les arnaques Steam en temps réel.' 
-                    },
-                    { 
-                        name: '🔊 Auto-Voice (Automatique)', 
-                        value: 'Rejoignez un salon vocal nommé *"Créer"* pour générer automatiquement votre salon privé temporaire (supprimé dès qu\'il est vide).' 
-                    },
-                    { 
-                        name: '🎫 Support & Tickets (`/ticket`)', 
-                        value: 'Génère un panneau interactif pour permettre aux membres d\'ouvrir un salon de discussion privé avec l\'équipe.' 
-                    },
-                    { 
-                        name: '🧹 Purge & Modération (`/clear`)', 
-                        value: 'Supprime rapidement entre 1 et 100 messages du salon actuel.' 
-                    },
-                    { 
-                        name: '🏓 Diagnostic (`/ping`)', 
-                        value: 'Affiche la latence exacte du bot et de la passerelle Discord.' 
-                    }
+                    { name: '🛡️ Sécurité & Anti-Scam', value: 'Détection et suppression immédiate des faux liens Nitro/Steam.' },
+                    { name: '🛑 Anti-Raid & Anti-Spam', value: 'Blocage des mentions massives et modération automatique du spam.' },
+                    { name: '🔊 Auto-Voice', value: 'Rejoignez un salon nommé *"Créer"* pour ouvrir un salon privé éphémère.' },
+                    { name: '🎫 Support (`/ticket`)', value: 'Génère un panneau interactif pour ouvrir des tickets privés.' },
+                    { name: '🧹 Modération (`/clear [nombre]`)', value: 'Purge rapide des messages récents.' },
+                    { name: '⚖️ Sanctions (`/kick`, `/ban`, `/timeout`)', value: 'Outils de gestion d\'équipe avec journalisation.' },
+                    { name: '📜 Logs d\'audit', value: 'Créez un salon nommé `logs` pour enregistrer automatiquement toutes les actions.' }
                 )
                 .setFooter({ text: 'Sentinel Bot • Cloud Ready 24/7' });
 
             await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
         }
 
-        // Commande /clear
+        // /clear
         if (commandName === 'clear') {
             const amount = interaction.options.getInteger('nombre');
-            
             try {
                 const deleted = await interaction.channel.bulkDelete(amount, true);
                 await interaction.reply({
                     content: `🧹 **${deleted.size}** message(s) supprimé(s) avec succès !`,
                     ephemeral: true
                 });
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('🧹 Nettoyage de salon')
+                    .setColor(0xFFA500)
+                    .setDescription(`<@${interaction.user.id}> a supprimé **${deleted.size}** messages dans <#${interaction.channel.id}>.`)
+                    .setTimestamp();
+                sendLog(interaction.guild, logEmbed);
             } catch (err) {
-                console.error('[Clear Error]', err);
                 await interaction.reply({
                     content: '❌ Impossible de supprimer ces messages (ils datent peut-être de plus de 14 jours).',
                     ephemeral: true
@@ -170,7 +250,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
         }
 
-        // Commande /ticket
+        // /ticket
         if (commandName === 'ticket') {
             const ticketEmbed = new EmbedBuilder()
                 .setTitle('📩 Centre d\'Assistance & Support')
@@ -188,52 +268,91 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             await interaction.reply({ embeds: [ticketEmbed], components: [row] });
         }
+
+        // /kick
+        if (commandName === 'kick') {
+            const target = interaction.options.getUser('membre');
+            const reason = interaction.options.getString('raison') || 'Aucune raison spécifiée';
+            const member = interaction.guild.members.cache.get(target.id);
+
+            if (!member || !member.kickable) {
+                return interaction.reply({ content: '❌ Impossible d\'expulser ce membre (rôle supérieur ou introuvable).', ephemeral: true });
+            }
+
+            await member.kick(reason);
+            await interaction.reply({ content: `✅ **${target.tag}** a été expulsé. (Raison : ${reason})` });
+
+            const logEmbed = new EmbedBuilder()
+                .setTitle('👢 Membre expulsé')
+                .setColor(0xFF4500)
+                .setDescription(`**Membre :** <@${target.id}> (${target.tag})\n**Modérateur :** <@${interaction.user.id}>\n**Raison :** ${reason}`)
+                .setTimestamp();
+            sendLog(interaction.guild, logEmbed);
+        }
+
+        // /ban
+        if (commandName === 'ban') {
+            const target = interaction.options.getUser('membre');
+            const reason = interaction.options.getString('raison') || 'Aucune raison spécifiée';
+
+            try {
+                await interaction.guild.members.ban(target.id, { reason });
+                await interaction.reply({ content: `⛔ **${target.tag}** a été banni définitivement. (Raison : ${reason})` });
+
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('⛔ Membre banni')
+                    .setColor(0xFF0000)
+                    .setDescription(`**Membre :** <@${target.id}> (${target.tag})\n**Modérateur :** <@${interaction.user.id}>\n**Raison :** ${reason}`)
+                    .setTimestamp();
+                sendLog(interaction.guild, logEmbed);
+            } catch (err) {
+                await interaction.reply({ content: '❌ Impossible de bannir ce membre.', ephemeral: true });
+            }
+        }
+
+        // /timeout
+        if (commandName === 'timeout') {
+            const target = interaction.options.getUser('membre');
+            const minutes = interaction.options.getInteger('minutes');
+            const reason = interaction.options.getString('raison') || 'Aucune raison spécifiée';
+            const member = interaction.guild.members.cache.get(target.id);
+
+            if (!member || !member.moderatable) {
+                return interaction.reply({ content: '❌ Impossible de sanctionner ce membre.', ephemeral: true });
+            }
+
+            await member.timeout(minutes * 60 * 1000, reason);
+            await interaction.reply({ content: `⏳ **${target.tag}** a été exclu temporairement pour **${minutes} minute(s)**. (Raison : ${reason})` });
+
+            const logEmbed = new EmbedBuilder()
+                .setTitle('⏳ Membre mis en sourdine (Timeout)')
+                .setColor(0xFFA500)
+                .setDescription(`**Membre :** <@${target.id}> (${target.tag})\n**Durée :** ${minutes} min\n**Modérateur :** <@${interaction.user.id}>\n**Raison :** ${reason}`)
+                .setTimestamp();
+            sendLog(interaction.guild, logEmbed);
+        }
     }
 
-    // B. BOUTONS INTERACTIFS (Tickets)
+    // B. BOUTONS (Tickets)
     if (interaction.isButton()) {
-        // Bouton : Ouvrir un ticket
         if (interaction.customId === 'open_ticket') {
             const user = interaction.user;
             const guild = interaction.guild;
             const channelName = `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
 
-            // Vérifier si un ticket existe déjà pour cet utilisateur
             const existing = guild.channels.cache.find(c => c.name === channelName);
             if (existing) {
-                return interaction.reply({
-                    content: `⚠️ Vous avez déjà un ticket ouvert ici : <#${existing.id}>`,
-                    ephemeral: true
-                });
+                return interaction.reply({ content: `⚠️ Vous avez déjà un ticket ouvert ici : <#${existing.id}>`, ephemeral: true });
             }
 
             try {
-                // Créer le salon textuel privé
                 const ticketChannel = await guild.channels.create({
                     name: channelName,
                     type: ChannelType.GuildText,
                     permissionOverwrites: [
-                        {
-                            id: guild.roles.everyone.id,
-                            deny: [PermissionFlagsBits.ViewChannel]
-                        },
-                        {
-                            id: user.id,
-                            allow: [
-                                PermissionFlagsBits.ViewChannel,
-                                PermissionFlagsBits.SendMessages,
-                                PermissionFlagsBits.ReadMessageHistory,
-                                PermissionFlagsBits.AttachFiles
-                            ]
-                        },
-                        {
-                            id: client.user.id,
-                            allow: [
-                                PermissionFlagsBits.ViewChannel,
-                                PermissionFlagsBits.SendMessages,
-                                PermissionFlagsBits.ManageChannels
-                            ]
-                        }
+                        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+                        { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
+                        { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] }
                     ]
                 });
 
@@ -252,42 +371,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 );
 
                 await ticketChannel.send({ embeds: [welcomeEmbed], components: [closeRow] });
+                await interaction.reply({ content: `✅ Ticket créé : <#${ticketChannel.id}>`, ephemeral: true });
 
-                await interaction.reply({
-                    content: `✅ Votre ticket a été créé avec succès : <#${ticketChannel.id}>`,
-                    ephemeral: true
-                });
+                const logEmbed = new EmbedBuilder()
+                    .setTitle('🎫 Nouveau ticket ouvert')
+                    .setColor(0x5865F2)
+                    .setDescription(`<@${user.id}> a ouvert le salon <#${ticketChannel.id}>.`)
+                    .setTimestamp();
+                sendLog(guild, logEmbed);
             } catch (err) {
-                console.error('[Ticket Creation Error]', err);
-                await interaction.reply({
-                    content: '❌ Une erreur est survenue lors de la création du ticket. Vérifiez mes permissions administratives.',
-                    ephemeral: true
-                });
+                await interaction.reply({ content: '❌ Erreur de création du ticket.', ephemeral: true });
             }
         }
 
-        // Bouton : Fermer le ticket
         if (interaction.customId === 'close_ticket') {
-            await interaction.reply({
-                content: '🔒 **Clôture du ticket** : Ce salon sera définitivement supprimé dans 5 secondes...'
-            });
-
+            await interaction.reply({ content: '🔒 **Clôture du ticket** : Ce salon sera supprimé dans 5 secondes...' });
             setTimeout(async () => {
                 try {
-                    await interaction.channel.delete('Ticket résolu et fermé.');
-                } catch (err) {
-                    console.error('[Ticket Delete Error]', err);
-                }
+                    await interaction.channel.delete('Ticket résolu.');
+                } catch (err) {}
             }, 5000);
         }
     }
 });
 
 // ==========================================
-// 5. MODULE AUTO-VOICE (Salons vocaux éphémères)
+// 6. MODULE AUTO-VOICE (Salons vocaux éphémères)
 // ==========================================
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-    // Cas 1 : L'utilisateur rejoint un salon nommé "Créer"
     if (newState.channel && newState.channel.name.toLowerCase().includes('créer')) {
         const guild = newState.guild;
         const member = newState.member;
@@ -316,21 +427,18 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         }
     }
     
-    // Cas 2 : L'utilisateur quitte un salon temporaire (suppression si vide)
     if (oldState.channel && temporaryChannels.has(oldState.channel.id)) {
         if (oldState.channel.members.size === 0) {
             temporaryChannels.delete(oldState.channel.id);
             try {
                 await oldState.channel.delete('Salon vocal temporaire vide.');
-            } catch (err) {
-                console.error('[Auto-Voice Delete Error]', err);
-            }
+            } catch (err) {}
         }
     }
 });
 
 // ==========================================
-// 6. MODULE SÉCURITÉ (Anti-Phishing & Scam)
+// 7. MODULE SÉCURITÉ, ANTI-SCAM & ANTI-SPAM
 // ==========================================
 const suspiciousPatterns = [
     /discord[-.]?(gift|nitro|app[-.]gift)/i,
@@ -342,20 +450,56 @@ const suspiciousPatterns = [
 client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot || !message.guild) return;
     
+    const member = message.member;
+
+    // A. Anti-Phishing
     const isSuspicious = suspiciousPatterns.some(pattern => pattern.test(message.content));
-    
     if (isSuspicious) {
         try {
             await message.delete();
             await message.channel.send({
-                content: `⚠️ **Alerte Sécurité** : Un message contenant un lien suspect posté par <@${message.author.id}> a été supprimé automatiquement.`
+                content: `⚠️ **Alerte Sécurité** : Un message contenant un lien suspect posté par <@${message.author.id}> a été supprimé.`
             });
-        } catch (err) {
-            console.error('[Security Delete Error]', err);
-        }
+
+            const logEmbed = new EmbedBuilder()
+                .setTitle('🚨 Alerte Phishing / Scam')
+                .setColor(0xFF0000)
+                .setDescription(`**Auteur :** <@${message.author.id}>\n**Salon :** <#${message.channel.id}>\n**Message supprimé :** \`\`\`${message.content}\`\`\``)
+                .setTimestamp();
+            sendLog(message.guild, logEmbed);
+        } catch (err) {}
+        return;
     }
-    
-    // Raccourci textuel classique !ping
+
+    // B. Anti-Raid : Mentions massives (@everyone / @here sans permission)
+    if ((message.content.includes('@everyone') || message.content.includes('@here')) && !member.permissions.has(PermissionFlagsBits.MentionEveryone)) {
+        try {
+            await message.delete();
+            if (member.moderatable) {
+                await member.timeout(10 * 60 * 1000, 'Tentative de mention massive (@everyone)');
+            }
+            await message.channel.send(`🛑 <@${message.author.id}> a été exclu 10 minutes pour mention massive interdite.`);
+        } catch (err) {}
+        return;
+    }
+
+    // C. Anti-Spam (limite de fréquence : 5 messages en 4 secondes)
+    const now = Date.now();
+    const timestamps = userMessageHistory.get(message.author.id) || [];
+    const recent = timestamps.filter(time => now - time < 4000);
+    recent.push(now);
+    userMessageHistory.set(message.author.id, recent);
+
+    if (recent.length >= 5) {
+        try {
+            if (member && member.moderatable) {
+                await member.timeout(2 * 60 * 1000, 'Spam rapide détecté');
+                await message.channel.send(`⏱️ <@${message.author.id}> a été mis en sourdine 2 minutes pour spam.`);
+            }
+        } catch (err) {}
+    }
+
+    // Raccourci !ping
     if (message.content === '!ping') {
         const ping = Date.now() - message.createdTimestamp;
         message.reply(`🏓 **Pong !** Latence : \`${ping}ms\` | API : \`${Math.round(client.ws.ping)}ms\``);
@@ -363,7 +507,7 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 // ==========================================
-// 7. CONNEXION DU BOT
+// 8. CONNEXION DU BOT
 // ==========================================
 if (process.env.DISCORD_TOKEN) {
     client.login(process.env.DISCORD_TOKEN).catch(err => {
